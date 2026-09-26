@@ -168,7 +168,7 @@ def _install(vault, state, uninstall=False, plan_only=False, version="3.0.0", le
         # point once it exists, so the first resolve above keeps the pre-redirect
         # spelling. Pinning that spelling makes processes inside the package and
         # outside it read the same string and reach different directories.
-        state.mkdir(parents=True, exist_ok=True)
+        state.mkdir(parents=True, exist_ok=True, mode=0o700)
         state = state.resolve()
         if state == vault or vault in state.parents:
             raise ValueError("Existing vault and state outside vault required")
