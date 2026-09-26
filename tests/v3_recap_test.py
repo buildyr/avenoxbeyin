@@ -57,6 +57,42 @@ class RecentReceiptsTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     recent_receipts(self.db, days=days, limit=limit)
 
+    def test_human_output_neutralizes_terminal_controls(self):
+        result = {'from': '2026-09-25', 'through': '2026-09-25', 'items': [{
+            'created_at': '2026-09-25T12:00:00+00:00', 'source': 'receipts/x.md',
+            'summary': 'ilk\n\x1b[2J\x1b]52;c;ZWNobw==\x07‮ters Şirket',
+            'refs': ['notes/\x1b[31mref.md'], 'refs_withheld': {'private': 1, 'missing': 0}}],
+            'truncated': False, 'undated_omitted': 0}
+        text = human_result(result, 'recap')
+        self.assertFalse(any(ch in text for ch in '\x1b\x07‮'))
+        self.assertIn('ilk / ?[2J', text)
+        self.assertIn('Şirket', text)
+        self.assertIn('ozel kaynak baglantisi gizlendi', text)
+
+    def test_cli_withholds_private_and_missing_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            vault, state, moved = Path(temp) / 'vault', Path(temp) / 'state', Path(temp) / 'moved'
+            (vault / 'notes').mkdir(parents=True)
+            moved.mkdir()
+            (vault / 'notes/source.md').write_text('Source evidence.\n', encoding='utf-8')
+            (vault / 'notes/diary.md').write_text('---\nvisibility: private\n---\nPrivate.\n', encoding='utf-8')
+            command = [sys.executable, str(ROOT / 'scripts/beyin_v3.py'), '--vault', str(vault), '--state', str(state)]
+            for ident, refs in (('kept', ['notes/source.md', 'notes/diary.md']), ('dropped', ['notes/source.md'])):
+                saved = subprocess.run(command + ['receipt', '--harness', 'codex'], input=json.dumps({
+                    'event_id': ident, 'summary': 'Outcome ' + ident, 'refs': refs}),
+                    capture_output=True, text=True, encoding='utf-8')
+                self.assertEqual(saved.returncode, 0, saved.stderr)
+            dropped = json.loads(saved.stdout)['source']
+            (vault / dropped).rename(moved / 'dropped.md')
+            read = subprocess.run(command + ['recap', '--days', '1'], capture_output=True, text=True, encoding='utf-8')
+            self.assertEqual(read.returncode, 0, read.stderr)
+            result = json.loads(read.stdout)
+            self.assertEqual(result['missing_source_omitted'], 1)
+            self.assertEqual([item['summary'] for item in result['items']], ['Outcome kept'])
+            self.assertEqual(result['items'][0]['refs'], ['notes/source.md'])
+            self.assertEqual(result['items'][0]['refs_withheld'], {'private': 1, 'missing': 0})
+            self.assertNotIn('diary', read.stdout)
+
     def test_cli_returns_recorded_receipt_without_model_call(self):
         with tempfile.TemporaryDirectory() as temp:
             vault, state = Path(temp) / 'vault', Path(temp) / 'state'

@@ -330,7 +330,7 @@ def main(argv=None):
                 raise RuntimeError('Recap blocked: source sync conflict. Run sync to inspect sources.')
             from beyin_v3_projections import recent_receipts
             with store._connect() as db:
-                result = recent_receipts(db, days=args.days, limit=args.limit)
+                result = recent_receipts(db, days=args.days, limit=args.limit, vault=vault)
             if refreshed.get('status') == 'degraded':
                 warnings = refreshed.get('warnings', [])
                 result['partial'] = True

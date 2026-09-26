@@ -3,13 +3,47 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import sqlite3
 import time
 
 
-def recent_receipts(db, days=7, limit=20, today=None):
-    """A bounded, source-linked activity view; summaries remain agent claims."""
+def _hidden_ref_sources(db, refs):
+    """Indexed sources that default internal context never shows (the _eligible visibility/trust gate)."""
+    refs = sorted(set(refs))
+    hidden = set()
+    for start in range(0, len(refs), 500):
+        chunk = refs[start:start + 500]
+        try:
+            rows = db.execute('SELECT r.payload FROM markdown_sources m JOIN records r ON r.id = m.id WHERE m.source IN (' +
+                              ','.join('?' * len(chunk)) + ')', chunk).fetchall()
+        except sqlite3.OperationalError:  # a bare receipts-only database has no source index
+            return hidden
+        for (payload,) in rows:
+            record = json.loads(payload)
+            if (record.get('visibility', 'internal') not in ('public', 'internal') or record.get('trust') == 'untrusted' or
+                    record.get('trusted') is False or record.get('status') == 'untrusted' or record.get('kind') == 'untrusted'):
+                hidden.add(record.get('source'))
+    return hidden
+
+
+def _vault_file(vault, relative):
+    try:
+        root = Path(vault).resolve()
+        target = (root / relative).resolve()
+        return target.is_relative_to(root) and target.is_file()
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def recent_receipts(db, days=7, limit=20, today=None, vault=None):
+    """A bounded, source-linked activity view; summaries remain agent claims.
+
+    With a vault, receipts whose own source file is gone are omitted, and refs that no longer
+    exist or that point at private/untrusted records are withheld and only counted.
+    """
     if not 1 <= days <= 366 or not 1 <= limit <= 100:
         raise ValueError('recap days must be 1..366 and limit must be 1..100')
     today = today or datetime.now(timezone.utc).date()
@@ -32,23 +66,47 @@ def recent_receipts(db, days=7, limit=20, today=None):
         if not isinstance(ident, str) or not ident or not isinstance(event.get('summary'), str):
             undated += 1
             continue
-        matches.append((stamp, ident, event))
+        source = 'receipts/' + hashlib.sha256(ident.encode()).hexdigest() + '.md'
+        matches.append((stamp, ident, source, event))
+    missing_sources = 0
+    if vault is not None:
+        # One directory listing instead of a stat per receipt; symlinked receipts are never adopted by sync.
+        receipts_dir = Path(vault) / 'receipts'
+        try:
+            names = {entry.name for entry in os.scandir(receipts_dir) if entry.is_file(follow_symlinks=False)}
+        except OSError:
+            names = set()
+        present = [match for match in matches if match[2][len('receipts/'):] in names]
+        missing_sources = len(matches) - len(present)
+        matches = present
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    shown = [(stamp, source, event, [ref for ref in event.get('refs') or [] if isinstance(ref, str)]
+              if isinstance(event.get('refs'), list) else []) for stamp, _, source, event in matches[:limit]]
+    hidden = _hidden_ref_sources(db, [ref for *_, refs in shown for ref in refs]) if vault is not None else set()
     items = []
-    for stamp, ident, event in matches[:limit]:
-        items.append({
-            'created_at': stamp.isoformat(),
-            'summary': event['summary'],
-            'refs': event.get('refs') if isinstance(event.get('refs'), list) else [],
-            'source': 'receipts/' + hashlib.sha256(ident.encode()).hexdigest() + '.md',
-        })
-    return {
+    for stamp, source, event, refs in shown:
+        kept, private, missing = [], 0, 0
+        for ref in refs:
+            if ref in hidden:
+                private += 1
+            elif vault is not None and not _vault_file(vault, ref):
+                missing += 1
+            else:
+                kept.append(ref)
+        item = {'created_at': stamp.isoformat(), 'summary': event['summary'], 'source': source, 'refs': kept}
+        if private or missing:
+            item['refs_withheld'] = {'private': private, 'missing': missing}
+        items.append(item)
+    result = {
         'status': 'ok', 'from': start.isoformat(), 'through': today.isoformat(),
-        'timezone': 'UTC', 'total': len(matches), 'shown': len(items),
+        'timezone': 'UTC', 'audience': 'internal', 'total': len(matches), 'shown': len(items),
         'truncated': len(matches) > limit, 'undated_omitted': undated,
         'items': items,
         'meaning': 'Agent-authored outcomes, not independently verified facts.',
     }
+    if missing_sources:
+        result['missing_source_omitted'] = missing_sources
+    return result
 
 
 def _checkpoint_schema(db):
