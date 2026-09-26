@@ -187,9 +187,11 @@ class TransactionRootTest(unittest.TestCase):
         for command in manifest['commands']:
             # Hook commands carry --state too; posix quoting leaves this fixture path bare,
             # the Windows form is base64-encoded, so only check the plain one.
+            # Claude hook commands spell Windows paths with forward slashes.
             if '--state' in command:
-                self.assertIn(redirected, command)
+                self.assertTrue(redirected in command or Path(redirected).as_posix() in command, command)
                 self.assertNotIn(str(state) + ' ', command)
+                self.assertNotIn(state.as_posix() + ' ', command)
 
 
 if __name__ == '__main__':
